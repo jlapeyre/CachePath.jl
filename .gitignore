@@ -2,3 +2,6 @@
 *.jl.cov
 *.jl.mem
 /Manifest.toml
+.envrc
+repl_history.jl
+bin/
