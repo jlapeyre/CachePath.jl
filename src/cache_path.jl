@@ -6,19 +6,15 @@ function cachepathdebug(args...)
     end
 end
 
-
-using Base: require_lock, PkgId,
-    root_module, root_module_exists, PkgOrigin, pkgorigins, run_package_callbacks,
-    package_locks, toplevel_load, locate_package, JLOptions,
-    PrecompilableError, @logmsg, @constprop,
+using Base: require_lock, PkgId, root_module, root_module_exists, PkgOrigin,
+    pkgorigins, run_package_callbacks, package_locks, toplevel_load,
+    locate_package, JLOptions, PrecompilableError, @logmsg, @constprop,
     cache_file_entry, isfile_casesensitive, stale_cachefile,
-    _include_from_serialized, TIMING_IMPORTS,
-    _concrete_dependencies, loaded_modules, module_build_id,
-    CoreLogging, create_expr_cache, _crc32c, preferences_hash,
-    slug, MAX_NUM_PRECOMPILE_FILES, rename,
-    _tryrequire_from_serialized
+    _include_from_serialized, TIMING_IMPORTS, _concrete_dependencies,
+    loaded_modules, module_build_id, CoreLogging, create_expr_cache, _crc32c,
+    preferences_hash, slug, MAX_NUM_PRECOMPILE_FILES, rename,
+    _tryrequire_from_serialized, _require_from_serialized
 
-using Base:  _require_from_serialized
 
 """
     Base.require(package::AbstractString, depot_path::AbstractString)
@@ -39,7 +35,6 @@ require(package::AbstractString, depot_path::AbstractString, noclobber::Bool = f
 require(uuidkey::PkgId, depot_path::AbstractString, noclobber::Bool=false) =
     @lock require_lock _require_prelocked(uuidkey, depot_path, noclobber)
 
-
 function _require_prelocked(uuidkey::PkgId, depot_path::AbstractString, noclobber::Bool)
     just_loaded_pkg = false
     if !root_module_exists(uuidkey)
@@ -57,7 +52,6 @@ function _require_prelocked(uuidkey::PkgId, depot_path::AbstractString, noclobbe
     end
     return root_module(uuidkey)
 end
-
 
 function _require(pkg::PkgId, depot_path::AbstractString, noclobber::Bool)
     # handle recursive calls to require
@@ -308,7 +302,6 @@ function compilecache(pkg::PkgId, path::String, depot_path::String, internal_std
     end
 end
 
-
 function compilecache_path(pkg::PkgId, depot_path::String, prefs_hash::UInt64)::String
     entrypath, entryfile = cache_file_entry(pkg)
     cachepath = joinpath(depot_path, entrypath)
@@ -328,7 +321,7 @@ function compilecache_path(pkg::PkgId, depot_path::String, prefs_hash::UInt64)::
 end
 
 # Careful to not make this a method of compilecache, else the second arg will
-# Be interpreted as the package path (source?)
+# be interpreted as the package path (source?)
 function compilecache_depot(pkg::PkgId, depot_path::String, internal_stderr::IO = stderr, internal_stdout::IO = stdout)
     @nospecialize internal_stderr internal_stdout
     path = locate_package(pkg)
