@@ -15,7 +15,8 @@ using Base: require_lock, PkgId,
     _include_from_serialized, TIMING_IMPORTS,
     _concrete_dependencies, loaded_modules, module_build_id,
     CoreLogging, create_expr_cache, _crc32c, preferences_hash,
-    slug, MAX_NUM_PRECOMPILE_FILES, rename
+    slug, MAX_NUM_PRECOMPILE_FILES, rename,
+    _tryrequire_from_serialized
 
 using Base:  _require_from_serialized
 
