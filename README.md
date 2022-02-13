@@ -8,8 +8,8 @@
 
 ### Function
 
-    Base.require(package::AbstractString, depot_path::AbstractString)
-    Base.require(package::Base.PkgId, depot_path::AbstractString)
+    CachePath.require(package::AbstractString, depot_path::AbstractString)
+    CachePath.require(package::Base.PkgId, depot_path::AbstractString)
 
 Load `package` and store the cached precompile file in the depot specified
 by `depot_path`. If it does not exist, `depot_path` is created. If the
@@ -17,5 +17,5 @@ cached precompiled file is found in `depot_path`, then it is loaded.
 
 ### Example
 ```julia
-const Example = Base.require("Example", "./a_depot")
+const Example = CachePath.require("Example", "./a_depot")
 ```
