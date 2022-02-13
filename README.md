@@ -6,9 +6,9 @@
 
 `CachePath` allows temporarily adding a depot for saving and loading precompiled cache (`.ji`) files.
 This package creates methods for exisiting functions in `Base`. It will probably break things if you use it.
-There is no reason for the methods to be in `Base` rather than functions in `CachePath` except
-that getting Symbol qualifications correct is time consuming.
 
+
+### Functions
 
     Base.require(package::AbstractString, depot_path::AbstractString)
     Base.require(package::Base.PkgId, depot_path::AbstractString)
