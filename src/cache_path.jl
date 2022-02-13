@@ -1,7 +1,15 @@
+const CACHE_PATH_DEBUG = false
+
+function cachepathdebug(args...)
+    if CACHE_PATH_DEBUG
+        println(args...)
+    end
+end
+
 function compilecache_dir(pkg::PkgId, depot_path::String)
     entrypath, entryfile = cache_file_entry(pkg)
-    println("compilecache_dir($pkg ::PkgId, $depot_path ::String)")
-    println("joinpath($depot_path, $entrypath)")
+    cachepathdebug("compilecache_dir($pkg ::PkgId, $depot_path ::String)")
+    cachepathdebug("joinpath($depot_path, $entrypath)")
     return joinpath(depot_path, entrypath)
 end
 
@@ -19,7 +27,7 @@ function compilecache_path(pkg::PkgId, depot_path::String, prefs_hash::UInt64)::
         project_precompile_slug = slug(crc, 5)
         return_path = abspath(cachepath, string(entryfile, "_", project_precompile_slug, ".ji"))
     end
-    println("compile_cache_path: $return_path")
+    cachepathdebug("compile_cache_path: $return_path")
     return return_path
 end
 
@@ -39,7 +47,7 @@ function compilecache(pkg::PkgId, path::String, depot_path::String, internal_std
 
     @nospecialize internal_stderr internal_stdout
     # decide where to put the resulting cache file
-    println("compilecache: depot_path $depot_path")
+    cachepathdebug("compilecache: depot_path $depot_path")
     cachepath = compilecache_dir(pkg, depot_path)
 
     # build up the list of modules that we want the precompile process to preserve
@@ -87,7 +95,7 @@ function compilecache(pkg::PkgId, path::String, depot_path::String, internal_std
             end
 
             # this is atomic according to POSIX:
-            println("rename($tmppath, $cachefile; force=true)")
+            cachepathdebug("rename($tmppath, $cachefile; force=true)")
             rename(tmppath, cachefile; force=true)
             return cachefile
         end
@@ -104,12 +112,15 @@ end
 # returns `true` if require found a precompile cache for this sourcepath, but couldn't load it
 # returns `false` if the module isn't known to be precompilable
 # returns the set of modules restored if the cache load succeeded
-@constprop :none function _require_search_from_serialized(pkg::PkgId, depot_path::String, sourcepath::String, depth::Int = 0)
+@constprop :none function _require_search_from_serialized(pkg::PkgId, depot_path::String, sourcepath::String, noclobber::Bool, depth::Int = 0)
     t_before = time_ns()
     paths = find_all_in_cache_path(pkg, depot_path)
     for path_to_try in paths::Vector{String}
+        cachepathdebug("path_to_try ", path_to_try)
+        cachepathdebug("sourcepath ", sourcepath)
         staledeps = stale_cachefile(sourcepath, path_to_try)
-        if staledeps === true
+#        cachepathdebug("Staledeps $staledeps")
+        if staledeps === true #  && ! noclobber
             continue
         end
         try
@@ -117,22 +128,24 @@ end
         catch # file might be read-only and then we fail to update timestamp, which is fine
         end
         # finish loading module graph into staledeps
-        for i in 1:length(staledeps)
-            dep = staledeps[i]
-            dep isa Module && continue
-            modpath, modkey, build_id = dep::Tuple{String, PkgId, UInt64}
-            dep = _tryrequire_from_serialized(modkey, build_id, modpath, depth + 1)
-            if dep === nothing
-                @debug "Required dependency $modkey failed to load from cache file for $modpath."
-                staledeps = true
-                break
+#        if staledeps !== true
+            for i in 1:length(staledeps)
+                dep = staledeps[i]
+                dep isa Module && continue
+                modpath, modkey, build_id = dep::Tuple{String, PkgId, UInt64}
+                dep = _tryrequire_from_serialized(modkey, build_id, modpath, depth + 1)
+                if dep === nothing
+                    @debug "Required dependency $modkey failed to load from cache file for $modpath."
+                    staledeps = true
+                    break
+                end
+                staledeps[i] = dep::Module
             end
-            staledeps[i] = dep::Module
-        end
-        if staledeps === true
+ #       end
+        if staledeps === true # && ! noclobber
             continue
         end
-        println("_include_from_serialized($path_to_try, staledeps)")
+        cachepathdebug("_include_from_serialized($path_to_try, staledeps)")
         restored = _include_from_serialized(path_to_try, staledeps)
         if isa(restored, Exception)
             @debug "Deserialization checks failed while attempting to load cache from $path_to_try" exception=restored
@@ -144,6 +157,7 @@ end
                 printstyled(tree_prefix, color = :light_black)
                 println(pkg.name)
             end
+            cachepathdebug("Restored ", restored)
             return restored
         end
     end
@@ -178,7 +192,7 @@ function find_all_in_cache_path(pkg::PkgId, depot_path::String)
 end
 
 
-function _require(pkg::PkgId, depot_path::AbstractString)
+function _require(pkg::PkgId, depot_path::AbstractString, noclobber::Bool)
     # handle recursive calls to require
     loading = get(package_locks, pkg, false)
     if loading !== false
@@ -203,7 +217,7 @@ function _require(pkg::PkgId, depot_path::AbstractString)
 
         # attempt to load the module file via the precompile cache locations
         if JLOptions().use_compiled_modules != 0
-            m = _require_search_from_serialized(pkg, depot_path, path)
+            m = _require_search_from_serialized(pkg, depot_path, path, noclobber)
             if !isa(m, Bool)
                 return
             end
@@ -272,12 +286,12 @@ function _require(pkg::PkgId, depot_path::AbstractString)
     nothing
 end
 
-require(uuidkey::PkgId, depot_path::AbstractString) = @lock require_lock _require_prelocked(uuidkey, depot_path)
+require(uuidkey::PkgId, depot_path::AbstractString, noclobber::Bool=false) = @lock require_lock _require_prelocked(uuidkey, depot_path, noclobber)
 
-function _require_prelocked(uuidkey::PkgId, depot_path::AbstractString)
+function _require_prelocked(uuidkey::PkgId, depot_path::AbstractString, noclobber::Bool)
     just_loaded_pkg = false
     if !root_module_exists(uuidkey)
-        cachefile = _require(uuidkey, depot_path)
+        cachefile = _require(uuidkey, depot_path, noclobber)
         if cachefile !== nothing
             get!(PkgOrigin, pkgorigins, uuidkey).cachepath = cachefile
         end
