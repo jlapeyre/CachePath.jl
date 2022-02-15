@@ -6,6 +6,9 @@
 
 `CachePath` allows temporarily adding a depot for saving and loading precompiled cache (`.ji`) files.
 
+The branch named julia-1.6.5 works with julia v1.6.5. This is also CachePath v0.1
+`CachePath` is fragile with respect to julia versions because it relys on internals that are not in the API.
+
 ### Function
 
     CachePath.require(package::AbstractString, depot_path::AbstractString)

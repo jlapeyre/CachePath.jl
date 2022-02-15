@@ -6,14 +6,20 @@ function cachepathdebug(args...)
     end
 end
 
-using Base: require_lock, PkgId, root_module, root_module_exists, PkgOrigin,
-    pkgorigins, run_package_callbacks, package_locks, toplevel_load,
-    locate_package, JLOptions, PrecompilableError, @logmsg, @constprop,
+using Base: PkgId, root_module, root_module_exists, PkgOrigin,
+    pkgorigins, package_locks, toplevel_load,
+    locate_package, JLOptions, PrecompilableError, @logmsg,
     cache_file_entry, isfile_casesensitive, stale_cachefile,
-    _include_from_serialized, TIMING_IMPORTS, _concrete_dependencies,
+    _include_from_serialized, _concrete_dependencies,
     loaded_modules, module_build_id, CoreLogging, create_expr_cache, _crc32c,
     preferences_hash, slug, MAX_NUM_PRECOMPILE_FILES, rename,
     _tryrequire_from_serialized, _require_from_serialized
+
+
+using Base: package_callbacks
+# Removed symbols relative to v1.8.0-DEV version
+# require_lock, run_package_callbacks, @constprop
+# TIMING_IMPORTS,
 
 
 """
@@ -29,31 +35,46 @@ cached precompiled file is found in `depot_path`, then it is loaded.
 const Example = Base.require("Example", "./a_depot")
 ```
 """
-require(package::AbstractString, depot_path::AbstractString, noclobber::Bool = false) =
-    require(Base.identify_package(package), depot_path, noclobber)
+require(package::AbstractString, depot_path::AbstractString) =
+    require(Base.identify_package(package), depot_path)
 
-require(uuidkey::PkgId, depot_path::AbstractString, noclobber::Bool=false) =
-    @lock require_lock _require_prelocked(uuidkey, depot_path, noclobber)
+# require(uuidkey::PkgId, depot_path::AbstractString, noclobber::Bool=false) =
+#     @lock require_lock _require_prelocked(uuidkey, depot_path, noclobber)
 
-function _require_prelocked(uuidkey::PkgId, depot_path::AbstractString, noclobber::Bool)
-    just_loaded_pkg = false
+function require(uuidkey::PkgId, depot_path::AbstractString)
     if !root_module_exists(uuidkey)
-        cachefile = _require(uuidkey, depot_path, noclobber)
+        cachefile = _require(uuidkey, depot_path)
         if cachefile !== nothing
             get!(PkgOrigin, pkgorigins, uuidkey).cachepath = cachefile
         end
         # After successfully loading, notify downstream consumers
-        run_package_callbacks(uuidkey)
-        just_loaded_pkg = true
-    end
-    if just_loaded_pkg && !root_module_exists(uuidkey)
-        error("package `$(uuidkey.name)` did not define the expected \
-              module `$(uuidkey.name)`, check for typos in package module name")
+        for callback in package_callbacks
+            invokelatest(callback, uuidkey)
+        end
     end
     return root_module(uuidkey)
 end
 
-function _require(pkg::PkgId, depot_path::AbstractString, noclobber::Bool)
+# function _require_prelocked(uuidkey::PkgId, depot_path::AbstractString, noclobber::Bool)
+#     just_loaded_pkg = false
+#     if !root_module_exists(uuidkey)
+#         cachefile = _require(uuidkey, depot_path, noclobber)
+#         if cachefile !== nothing
+#             get!(PkgOrigin, pkgorigins, uuidkey).cachepath = cachefile
+#         end
+#         # After successfully loading, notify downstream consumers
+#         run_package_callbacks(uuidkey)
+#         just_loaded_pkg = true
+#     end
+#     if just_loaded_pkg && !root_module_exists(uuidkey)
+#         error("package `$(uuidkey.name)` did not define the expected \
+#               module `$(uuidkey.name)`, check for typos in package module name")
+#     end
+#     return root_module(uuidkey)
+# end
+
+# Returns `nothing` or the name of the newly-created cachefile
+function _require(pkg::PkgId, depot_path::AbstractString)
     # handle recursive calls to require
     loading = get(package_locks, pkg, false)
     if loading !== false
@@ -61,7 +82,7 @@ function _require(pkg::PkgId, depot_path::AbstractString, noclobber::Bool)
         wait(loading)
         return
     end
-    package_locks[pkg] = Threads.Condition(require_lock)
+    package_locks[pkg] = Condition()
 
     last = toplevel_load[]
     try
@@ -78,7 +99,7 @@ function _require(pkg::PkgId, depot_path::AbstractString, noclobber::Bool)
 
         # attempt to load the module file via the precompile cache locations
         if JLOptions().use_compiled_modules != 0
-            m = _require_search_from_serialized(pkg, depot_path, path, noclobber)
+            m = _require_search_from_serialized(pkg, depot_path, path)
             if !isa(m, Bool)
                 return
             end
@@ -129,12 +150,10 @@ function _require(pkg::PkgId, depot_path::AbstractString, noclobber::Bool)
         if uuid !== old_uuid
             ccall(:jl_set_module_uuid, Cvoid, (Any, NTuple{2, UInt64}), __toplevel__, uuid)
         end
-        unlock(require_lock)
         try
             include(__toplevel__, path)
             return
         finally
-            lock(require_lock)
             if uuid !== old_uuid
                 ccall(:jl_set_module_uuid, Cvoid, (Any, NTuple{2, UInt64}), __toplevel__, old_uuid)
             end
@@ -146,6 +165,101 @@ function _require(pkg::PkgId, depot_path::AbstractString, noclobber::Bool)
     end
     nothing
 end
+
+
+# function _require(pkg::PkgId, depot_path::AbstractString)
+#     # handle recursive calls to require
+#     loading = get(package_locks, pkg, false)
+#     if loading !== false
+#         # load already in progress for this module
+#         wait(loading)
+#         return
+#     end
+#     package_locks[pkg] = Threads.Condition(require_lock)
+
+#     last = toplevel_load[]
+#     try
+#         toplevel_load[] = false
+#         # perform the search operation to select the module file require intends to load
+#         path = locate_package(pkg)
+#         get!(PkgOrigin, pkgorigins, pkg).path = path
+#         if path === nothing
+#             throw(ArgumentError("""
+#                 Package $pkg is required but does not seem to be installed:
+#                  - Run `Pkg.instantiate()` to install all recorded dependencies.
+#                 """))
+#         end
+
+#         # attempt to load the module file via the precompile cache locations
+#         if JLOptions().use_compiled_modules != 0
+#             m = _require_search_from_serialized(pkg, depot_path, path)
+#             if !isa(m, Bool)
+#                 return
+#             end
+#         end
+
+#         # if the module being required was supposed to have a particular version
+#         # but it was not handled by the precompile loader, complain
+#         for (concrete_pkg, concrete_build_id) in _concrete_dependencies
+#             if pkg == concrete_pkg
+#                 @warn """Module $(pkg.name) with build ID $concrete_build_id is missing from the cache.
+#                      This may mean $pkg does not support precompilation but is imported by a module that does."""
+#                 if JLOptions().incremental != 0
+#                     # during incremental precompilation, this should be fail-fast
+#                     throw(PrecompilableError())
+#                 end
+#             end
+#         end
+
+#         if JLOptions().use_compiled_modules != 0
+#             if (0 == ccall(:jl_generating_output, Cint, ())) || (JLOptions().incremental != 0)
+#                 # spawn off a new incremental pre-compile task for recursive `require` calls
+#                 # or if the require search declared it was pre-compiled before (and therefore is expected to still be pre-compilable)
+#                 cachefile = compilecache(pkg, path, depot_path)
+#                 if isa(cachefile, Exception)
+#                     if precompilableerror(cachefile)
+#                         verbosity = isinteractive() ? CoreLogging.Info : CoreLogging.Debug
+#                         @logmsg verbosity "Skipping precompilation since __precompile__(false). Importing $pkg."
+#                     else
+#                         @warn "The call to compilecache failed to create a usable precompiled cache file for $pkg" exception=m
+#                     end
+#                     # fall-through to loading the file locally
+#                 else
+#                     m = _require_from_serialized(cachefile)
+#                     if isa(m, Exception)
+#                         @warn "The call to compilecache failed to create a usable precompiled cache file for $pkg" exception=m
+#                     else
+#                         return cachefile
+#                     end
+#                 end
+#             end
+#         end
+
+#         # just load the file normally via include
+#         # for unknown dependencies
+#         uuid = pkg.uuid
+#         uuid = (uuid === nothing ? (UInt64(0), UInt64(0)) : convert(NTuple{2, UInt64}, uuid))
+#         old_uuid = ccall(:jl_module_uuid, NTuple{2, UInt64}, (Any,), __toplevel__)
+#         if uuid !== old_uuid
+#             ccall(:jl_set_module_uuid, Cvoid, (Any, NTuple{2, UInt64}), __toplevel__, uuid)
+#         end
+#         unlock(require_lock)
+#         try
+#             include(__toplevel__, path)
+#             return
+#         finally
+#             lock(require_lock)
+#             if uuid !== old_uuid
+#                 ccall(:jl_set_module_uuid, Cvoid, (Any, NTuple{2, UInt64}), __toplevel__, old_uuid)
+#             end
+#         end
+#     finally
+#         toplevel_load[] = last
+#         loading = pop!(package_locks, pkg)
+#         notify(loading, all=true)
+#     end
+#     nothing
+# end
 
 function find_all_in_cache_path(pkg::PkgId, depot_path::String)
     paths = String[]
@@ -173,18 +287,71 @@ function find_all_in_cache_path(pkg::PkgId, depot_path::String)
     end
 end
 
+
+
 # returns `true` if require found a precompile cache for this sourcepath, but couldn't load it
 # returns `false` if the module isn't known to be precompilable
 # returns the set of modules restored if the cache load succeeded
-@constprop :none function _require_search_from_serialized(pkg::PkgId, depot_path::String, sourcepath::String, noclobber::Bool, depth::Int = 0)
-    t_before = time_ns()
+# @constprop :none function _require_search_from_serialized(pkg::PkgId, depot_path::String, sourcepath::String, noclobber::Bool, depth::Int = 0)
+#     t_before = time_ns()
+#     paths = find_all_in_cache_path(pkg, depot_path)
+#     for path_to_try in paths::Vector{String}
+#         cachepathdebug("path_to_try ", path_to_try)
+#         cachepathdebug("sourcepath ", sourcepath)
+#         staledeps = stale_cachefile(sourcepath, path_to_try)
+# #        cachepathdebug("Staledeps $staledeps")
+#         if staledeps === true #  && ! noclobber
+#             continue
+#         end
+#         try
+#             touch(path_to_try) # update timestamp of precompilation file
+#         catch # file might be read-only and then we fail to update timestamp, which is fine
+#         end
+#         # finish loading module graph into staledeps
+# #        if staledeps !== true
+#             for i in 1:length(staledeps)
+#                 dep = staledeps[i]
+#                 dep isa Module && continue
+#                 modpath, modkey, build_id = dep::Tuple{String, PkgId, UInt64}
+#                 dep = _tryrequire_from_serialized(modkey, build_id, modpath, depth + 1)
+#                 if dep === nothing
+#                     @debug "Required dependency $modkey failed to load from cache file for $modpath."
+#                     staledeps = true
+#                     break
+#                 end
+#                 staledeps[i] = dep::Module
+#             end
+#  #       end
+#         if staledeps === true # && ! noclobber
+#             continue
+#         end
+#         cachepathdebug("_include_from_serialized($path_to_try, staledeps)")
+#         restored = _include_from_serialized(path_to_try, staledeps)
+#         if isa(restored, Exception)
+#             @debug "Deserialization checks failed while attempting to load cache from $path_to_try" exception=restored
+#         else
+#             if TIMING_IMPORTS[] > 0
+#                 elapsed = round((time_ns() - t_before) / 1e6, digits = 1)
+#                 tree_prefix = depth == 0 ? "" : "  "^(depth-1)*"┌ "
+#                 print(lpad(elapsed, 9), " ms  ")
+#                 printstyled(tree_prefix, color = :light_black)
+#                 println(pkg.name)
+#             end
+#             cachepathdebug("Restored ", restored)
+#             return restored
+#         end
+#     end
+#     return !isempty(paths)
+# end
+
+# returns `true` if require found a precompile cache for this sourcepath, but couldn't load it
+# returns `false` if the module isn't known to be precompilable
+# returns the set of modules restored if the cache load succeeded
+function _require_search_from_serialized(pkg::PkgId, depot_path::String, sourcepath::String)
     paths = find_all_in_cache_path(pkg, depot_path)
     for path_to_try in paths::Vector{String}
-        cachepathdebug("path_to_try ", path_to_try)
-        cachepathdebug("sourcepath ", sourcepath)
         staledeps = stale_cachefile(sourcepath, path_to_try)
-#        cachepathdebug("Staledeps $staledeps")
-        if staledeps === true #  && ! noclobber
+        if staledeps === true
             continue
         end
         try
@@ -192,41 +359,31 @@ end
         catch # file might be read-only and then we fail to update timestamp, which is fine
         end
         # finish loading module graph into staledeps
-#        if staledeps !== true
-            for i in 1:length(staledeps)
-                dep = staledeps[i]
-                dep isa Module && continue
-                modpath, modkey, build_id = dep::Tuple{String, PkgId, UInt64}
-                dep = _tryrequire_from_serialized(modkey, build_id, modpath, depth + 1)
-                if dep === nothing
-                    @debug "Required dependency $modkey failed to load from cache file for $modpath."
-                    staledeps = true
-                    break
-                end
-                staledeps[i] = dep::Module
+        for i in 1:length(staledeps)
+            dep = staledeps[i]
+            dep isa Module && continue
+            modpath, modkey, build_id = dep::Tuple{String, PkgId, UInt64}
+            dep = _tryrequire_from_serialized(modkey, build_id, modpath)
+            if dep === nothing
+                @debug "Required dependency $modkey failed to load from cache file for $modpath."
+                staledeps = true
+                break
             end
- #       end
-        if staledeps === true # && ! noclobber
+            staledeps[i] = dep::Module
+        end
+        if staledeps === true
             continue
         end
-        cachepathdebug("_include_from_serialized($path_to_try, staledeps)")
         restored = _include_from_serialized(path_to_try, staledeps)
         if isa(restored, Exception)
             @debug "Deserialization checks failed while attempting to load cache from $path_to_try" exception=restored
         else
-            if TIMING_IMPORTS[] > 0
-                elapsed = round((time_ns() - t_before) / 1e6, digits = 1)
-                tree_prefix = depth == 0 ? "" : "  "^(depth-1)*"┌ "
-                print(lpad(elapsed, 9), " ms  ")
-                printstyled(tree_prefix, color = :light_black)
-                println(pkg.name)
-            end
-            cachepathdebug("Restored ", restored)
             return restored
         end
     end
     return !isempty(paths)
 end
+
 
 function compilecache_dir(pkg::PkgId, depot_path::String)
     entrypath, entryfile = cache_file_entry(pkg)
