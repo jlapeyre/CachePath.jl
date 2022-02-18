@@ -11,6 +11,8 @@ using Base: PkgId, root_module, root_module_exists, PkgOrigin,
     package_callbacks
 #, @constprop
 
+export @cpimport
+
 const CACHE_PATH_DEBUG = false
 
 function cachepathdebug(args...)
@@ -37,11 +39,12 @@ else
     _Condition() = Threads.Condition(_require_lock)
 end
 
+# run_package_callbacks not present in v1.6.5
 function _run_package_callbacks(modkey::PkgId)
     unlock(_require_lock)
     try
         for callback in package_callbacks
-            invokelatest(callback, modkey)
+            Base.invokelatest(callback, modkey)
         end
     catch
         # Try to continue loading if a callback errors
@@ -63,6 +66,90 @@ macro _lock(l, expr)
         finally
             unlock(temp)
         end
+    end
+end
+
+"""
+    @cpimport module depot_path::AbstractString
+
+Import `module` using `depot_path` to store and retrieve the precompile
+cache. Precompile caches existing elsewhere are ignored.
+
+The semantics of `@cpimport` probably differ from those of `import` in
+other ways.
+
+# Examples:
+Import the module `Example` using "./newdepot" for storing and retrieving
+the precompile cache.
+
+
+    julia> @cpimport Example "./newdepot"
+"""
+macro cpimport(mod, depot_path)
+    qmod = QuoteNode(mod)
+    :(const $(esc(mod)) = CachePath.require(Main, $(esc(qmod)), $depot_path); nothing)
+end
+
+"""
+    CachePath.require(into::Module, module::Symbol, depot_path::AbstractString)
+
+This function is modified from `Base.require`. The precompiled cache (`.ji` file) for
+`module` will only be searched for and stored in `depot_path`.
+
+Loads a source file, in the context of the `Main` module, on every active node, searching
+standard locations for files. `require` is considered a top-level operation, so it sets the
+current `include` path but does not use it to search for files (see help for [`include`](@ref)).
+This function is typically used to load library code, and is implicitly called by `using` to
+load packages.
+
+When searching for files, `require` first looks for package code in the global array
+[`LOAD_PATH`](@ref). `require` is case-sensitive on all platforms, including those with
+case-insensitive filesystems like macOS and Windows.
+
+For more details regarding code loading, see the manual sections on [modules](@ref modules) and
+[parallel computing](@ref code-availability).
+"""
+function require(into::Module, mod::Symbol, depot_path::AbstractString)
+    @_lock _require_lock begin
+    # LOADING_CACHE[] = LoadingCache() # Does not exist in v1.6.5
+    try
+        uuidkey = Base.identify_package(into, String(mod))
+        # Core.println("require($(PkgId(into)), $mod) -> $uuidkey")
+        if uuidkey === nothing
+            where = PkgId(into)
+            if where.uuid === nothing
+                hint, dots = begin
+                    if isdefined(into, mod) && getfield(into, mod) isa Module
+                        true, "."
+                    elseif isdefined(parentmodule(into), mod) && getfield(parentmodule(into), mod) isa Module
+                        true, ".."
+                    else
+                        false, ""
+                    end
+                end
+                hint_message = hint ? ", maybe you meant `import/using $(dots)$(mod)`" : ""
+                start_sentence = hint ? "Otherwise, run" : "Run"
+                throw(ArgumentError("""
+                    Package $mod not found in current path$hint_message.
+                    - $start_sentence `import Pkg; Pkg.add($(repr(String(mod))))` to install the $mod package."""))
+            else
+                throw(ArgumentError("""
+                Package $(where.name) does not have $mod in its dependencies:
+                - You may have a partially installed environment. Try `Pkg.instantiate()`
+                  to ensure all packages in the environment are installed.
+                - Or, if you have $(where.name) checked out for development and have
+                  added $mod as a dependency but haven't updated your primary
+                  environment's manifest file, try `Pkg.resolve()`.
+                - Otherwise you may need to report an issue with $(where.name)"""))
+            end
+        end
+        if Base._track_dependencies[]
+            push!(Base._require_dependencies, (into, binpack(uuidkey), 0.0))
+        end
+        return _require_prelocked(uuidkey, depot_path)
+    finally
+#        LOADING_CACHE[] = nothing
+    end
     end
 end
 
@@ -232,7 +319,6 @@ end
         cachepathdebug("path_to_try ", path_to_try)
         cachepathdebug("sourcepath ", sourcepath)
         staledeps = stale_cachefile(sourcepath, path_to_try)
-#        cachepathdebug("Staledeps $staledeps")
         if staledeps === true
             continue
         end
