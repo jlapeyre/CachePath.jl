@@ -7,9 +7,9 @@ using Base: PkgId, root_module, root_module_exists, PkgOrigin,
     _include_from_serialized, _concrete_dependencies,
     loaded_modules, module_build_id, CoreLogging, create_expr_cache, _crc32c,
     preferences_hash, slug, MAX_NUM_PRECOMPILE_FILES, rename,
-    _tryrequire_from_serialized, _require_from_serialized,
+    _require_from_serialized,
     package_callbacks
-#, @constprop
+#, @constprop, _tryrequire_from_serialized,
 
 export @cpimport
 
@@ -298,6 +298,33 @@ const _TIMING_IMPORTS =
         Base.TIMING_IMPORTS
     end
 
+function _tryrequire_from_serialized(modkey::PkgId, build_id::UInt64, depot_path::String,
+                                     modpath::Union{Nothing, String},
+                                     depth::Int = 0)
+    if root_module_exists(modkey)
+        M = root_module(modkey)
+        if PkgId(M) == modkey && module_build_id(M) === build_id
+            return M
+        end
+    else
+        if modpath === nothing
+            modpath = locate_package(modkey)
+            modpath === nothing && return nothing
+        end
+        mod = _require_search_from_serialized(modkey, depot_path, String(modpath), depth)
+        get!(PkgOrigin, pkgorigins, modkey).path = modpath
+        if !isa(mod, Bool)
+            _run_package_callbacks(modkey)
+            for M in mod::Vector{Any}
+                M = M::Module
+                if PkgId(M) == modkey && module_build_id(M) === build_id
+                    return M
+                end
+            end
+        end
+    end
+    return nothing
+end
 
 macro myconstprop(setting, ex)
     if isa(setting, QuoteNode)
@@ -308,17 +335,21 @@ macro myconstprop(setting, ex)
     throw(ArgumentError("@myconstprop $setting not supported"))
 end
 
-
 # returns `true` if require found a precompile cache for this sourcepath, but couldn't load it
 # returns `false` if the module isn't known to be precompilable
 # returns the set of modules restored if the cache load succeeded
 @myconstprop :none function _require_search_from_serialized(pkg::PkgId, depot_path::String, sourcepath::String, depth::Int = 0)
     t_before = time_ns()
-    paths = find_all_in_cache_path(pkg, depot_path)
+    paths = find_all_in_cache_path(pkg, depot_path, depth)
     for path_to_try in paths::Vector{String}
         cachepathdebug("path_to_try ", path_to_try)
         cachepathdebug("sourcepath ", sourcepath)
         staledeps = stale_cachefile(sourcepath, path_to_try)
+        if staledeps === true
+            cachepathdebug("staledeps ", true)
+        else
+            cachepathdebug("length(staledeps) ", length(staledeps))
+        end
         if staledeps === true
             continue
         end
@@ -331,15 +362,17 @@ end
             dep = staledeps[i]
             dep isa Module && continue
             modpath, modkey, build_id = dep::Tuple{String, PkgId, UInt64}
-            dep = _tryrequire_from_serialized(modkey, build_id, modpath, depth + 1)
+            dep = _tryrequire_from_serialized(modkey, build_id, depot_path, modpath, depth + 1)
             if dep === nothing
                 @debug "Required dependency $modkey failed to load from cache file for $modpath."
+                cachepathdebug("Required dependency $modkey failed to load from cache file for $modpath.")
                 staledeps = true
                 break
             end
             staledeps[i] = dep::Module
         end
         if staledeps === true
+            cachepathdebug("staledeps set to true")
             continue
         end
         cachepathdebug("_include_from_serialized($path_to_try, staledeps)")
@@ -362,18 +395,22 @@ end
 end
 
 
-function find_all_in_cache_path(pkg::PkgId, depot_path::String)
+function find_all_in_cache_path(pkg::PkgId, depot_path::String, depth::Int)
+    cachepathdebug("find_all_in_cache_path: depth = ", depth)
     paths = String[]
     entrypath, entryfile = cache_file_entry(pkg)
-    # Use the second line to require that the cache file is in depot_path
-    # The first line will search in other depots if cache not found in depot_path
-#   for path in (joinpath(depot_path, entrypath), joinpath.(DEPOT_PATH, entrypath)...)
-    for path in (joinpath(depot_path, entrypath), )
+    if depth == 0 # Make CachePath.require look only in specified depot.
+        full_paths = (joinpath(depot_path, entrypath),)
+    else # Dependencies may be found in other depots (e.g. the standard one)
+        full_paths = (joinpath(depot_path, entrypath), joinpath.(DEPOT_PATH, entrypath)...)
+    end
+    for path in full_paths
+        #    for path in (joinpath(depot_path, entrypath), )
         isdir(path) || continue
         for file in readdir(path, sort = false) # no sort given we sort later
             if !((pkg.uuid === nothing && file == entryfile * ".ji") ||
-                 (pkg.uuid !== nothing && startswith(file, entryfile * "_")))
-                 continue
+                (pkg.uuid !== nothing && startswith(file, entryfile * "_")))
+                continue
             end
             filepath = joinpath(path, file)
             isfile_casesensitive(filepath) && push!(paths, filepath)
